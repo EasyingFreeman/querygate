@@ -14,6 +14,7 @@ datasources:
     allowed_objects: [ai_public.v_transactions]
     catalog:
       ai_public.v_transactions:
+        kind: view
         description: Posted transactions in the reporting currency
         columns:
           - {name: transaction_id, type: bigint}
@@ -32,6 +33,7 @@ datasources:
     allowed_objects: [AI_PUBLIC.V_ORDERS]
     catalog:
       AI_PUBLIC.V_ORDERS:
+        kind: view
         description: Order totals by order identifier
         columns:
           - {name: ORDER_ID, type: NUMBER}

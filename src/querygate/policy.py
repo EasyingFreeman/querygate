@@ -9,6 +9,7 @@ from sqlglot.tokens import Token, TokenType
 
 from .api_models import BindValue, QueryRequest
 from .config import Datasource
+from .object_names import CATALOG_IDENTIFIER, qualified_object_name
 from .errors import GatewayError
 
 SQL_BYTES = 32_768
@@ -127,8 +128,12 @@ class ValidatedQuery:
     params: list[BindValue] | dict[str, BindValue]
 
 
-def deny() -> GatewayError:
-    return GatewayError(422, "POLICY_DENIED", "Only supported read-only SQL constructs are allowed.")
+def deny(rule: str = "SQL_UNSUPPORTED_CONSTRUCT", message: str = "This SQL construct is outside the supported read-only subset.") -> GatewayError:
+    return GatewayError(422, "POLICY_DENIED", message, diagnostic=rule)
+
+
+def identity_disabled() -> GatewayError:
+    return deny("SQLSERVER_IDENTITY_DISABLED", "The effective SQL policy disables DB_NAME() and @@SERVERNAME.")
 
 
 def bad_params() -> GatewayError:
@@ -141,23 +146,23 @@ def validate_query(request: QueryRequest, source: Datasource) -> ValidatedQuery:
         if len(request.sql.encode("utf-8")) > SQL_BYTES:
             raise GatewayError(413, "REQUEST_TOO_LARGE", "SQL exceeds 32 KiB.")
     except UnicodeEncodeError:
-        raise deny() from None
+        raise deny("SQL_INVALID_TEXT", "SQL must be valid UTF-8 text.") from None
     if CONTROLS.search(request.sql):
-        raise deny()
+        raise deny("SQL_INVALID_TEXT", "SQL contains unsupported control characters.")
 
     try:
         dialect = Dialect.get_or_raise(source.dialect)
         tokens = dialect.tokenize(sql)
         if tokens and tokens[-1].token_type == TokenType.SEMICOLON:
             if tokens[-1].comments:
-                raise deny()
+                raise deny("SQL_COMMENT_OR_HINT", "SQL comments and optimizer hints are not allowed.")
             sql = sql[:tokens.pop().start].rstrip()
-        validate_tokens(tokens, source.dialect)
+        validate_tokens(tokens, source)
         statements = dialect.parser().parse(tokens, sql)
         if len(statements) != 1 or not isinstance(statements[0], (exp.Select, exp.SetOperation)):
-            raise deny()
+            raise deny("SQL_READ_ONLY_REQUIRED", "Submit exactly one read-only SELECT statement.")
         tree = statements[0]
-        validate_nodes(tree, source.dialect)
+        validate_nodes(tree, source)
         scopes = traverse_scope(tree)
         validate_tables(tree, source, scopes)
         if source.engine == "oracle":
@@ -171,48 +176,99 @@ def validate_query(request: QueryRequest, source: Datasource) -> ValidatedQuery:
     return ValidatedQuery(sql, params)
 
 
-def validate_tokens(tokens: list[Token], dialect: str) -> None:
-    if not tokens or len(tokens) > 4096 or tokens[0].token_type not in {TokenType.SELECT, TokenType.WITH}:
-        raise deny()
+def servername_tokens_at(tokens: list[Token], index: int) -> bool:
+    if index < 0 or index + 2 >= len(tokens):
+        return False
+    first, second, name = tokens[index:index + 3]
+    return (
+        first.token_type == second.token_type == TokenType.PARAMETER and name.token_type == TokenType.VAR
+        and name.text.upper() == "SERVERNAME" and first.end + 1 == second.start and second.end + 1 == name.start
+    )
+
+
+def validate_tokens(tokens: list[Token], source: Datasource) -> None:
+    dialect = source.dialect
+    if not tokens or tokens[0].token_type not in {TokenType.SELECT, TokenType.WITH}:
+        raise deny("SQL_READ_ONLY_REQUIRED", "Submit exactly one read-only SELECT statement.")
+    if len(tokens) > 4096:
+        raise deny("SQL_COMPLEXITY_LIMIT", "SQL exceeds the supported token limit.")
     allowed_paren = FUNCTIONS | DIALECT_FUNCTIONS[dialect] | PAREN_SYNTAX | TYPES
     if dialect == "tsql":
-        allowed_paren |= {"TOP"}
+        allowed_paren |= {"TOP", "DB_NAME"}
     depth = 0
     for index, token in enumerate(tokens):
         kind = token.token_type
-        if token.comments or kind in {
-            TokenType.HINT, TokenType.SEMICOLON, TokenType.PARAMETER, TokenType.L_BRACE, TokenType.R_BRACE,
-        }:
-            raise deny()
+        if token.comments or kind == TokenType.HINT:
+            raise deny("SQL_COMMENT_OR_HINT", "SQL comments and optimizer hints are not allowed.")
+        if kind == TokenType.SEMICOLON:
+            raise deny("SQL_READ_ONLY_REQUIRED", "Submit exactly one read-only SELECT statement.")
+        if kind == TokenType.PARAMETER:
+            if dialect == "tsql" and (servername_tokens_at(tokens, index) or servername_tokens_at(tokens, index - 1)):
+                if not source.sql_policy.allow_sqlserver_identity:
+                    raise identity_disabled()
+            else:
+                raise deny("SQL_VARIABLE_NOT_ALLOWED", "SQL variables are not allowed. Use the datasource's bind markers.")
+        if kind in {TokenType.L_BRACE, TokenType.R_BRACE}:
+            raise deny("SQL_ESCAPE_NOT_ALLOWED", "SQL escape clauses are not supported.")
         if kind == TokenType.L_PAREN:
             depth += 1
             if depth > 32:
-                raise deny()
+                raise deny("SQL_COMPLEXITY_LIMIT", "SQL exceeds the supported nesting limit.")
         elif kind == TokenType.R_PAREN:
             depth -= 1
         if index + 1 == len(tokens) or tokens[index + 1].token_type != TokenType.L_PAREN:
             continue
         if index and tokens[index - 1].token_type == TokenType.DOT:
-            raise deny()
+            raise deny("SQL_FUNCTION_NOT_ALLOWED", "Schema-qualified function calls are not allowed.")
+        if dialect == "tsql" and token.text.upper() == "DB_NAME" and kind != TokenType.STRING:
+            if not source.sql_policy.allow_sqlserver_identity:
+                raise identity_disabled()
         if kind == TokenType.IDENTIFIER or (
             kind != TokenType.STRING and IDENTIFIER.fullmatch(token.text)
             and token.text.upper() not in allowed_paren
         ):
-            raise deny()
+            raise deny("SQL_FUNCTION_NOT_ALLOWED", "The function is outside the built-in read-only function list.")
 
 
-def validate_nodes(tree: exp.Expression, dialect: str) -> None:
+def validate_nodes(tree: exp.Expression, source: Datasource) -> None:
+    policy = source.sql_policy
     for node in tree.walk():
-        allowed_args = ALLOWED_ARGS.get(type(node).__name__)
-        if allowed_args is None or node.comments or any(
-            key not in allowed_args and value is not None and value is not False and value != []
-            for key, value in node.args.items()
+        if not policy.allow_ctes and isinstance(node, exp.With):
+            raise deny("SQL_CTE_DISABLED", "The effective SQL policy disables common table expressions (WITH).")
+        if not policy.allow_subqueries and (
+            isinstance(node, (exp.Subquery, exp.Exists)) or (isinstance(node, exp.In) and node.args.get("query"))
         ):
-            raise deny()
+            raise deny("SQL_SUBQUERY_DISABLED", "The effective SQL policy disables subqueries.")
+        if not policy.allow_windows and isinstance(node, exp.Window):
+            raise deny("SQL_WINDOW_DISABLED", "The effective SQL policy disables window functions (OVER).")
+        if isinstance(node, exp.Select) and node.args.get("into") is not None:
+            raise deny("SQL_READ_ONLY_REQUIRED", "SELECT INTO creates a table and is not allowed.")
+        if source.dialect == "tsql" and policy.allow_sqlserver_identity:
+            if isinstance(node, exp.Anonymous) and node.name.upper() == "DB_NAME":
+                if not node.expressions and node.args.keys() <= {"this", "expressions"}:
+                    continue
+                raise deny("SQL_FUNCTION_ARGUMENTS", "Only DB_NAME() without arguments is permitted.")
+            if isinstance(node, (exp.Parameter, exp.Var)):
+                current = node
+                while isinstance(current.parent, exp.Parameter):
+                    current = current.parent
+                if (
+                    isinstance(current, exp.Parameter) and isinstance(current.this, exp.Parameter)
+                    and isinstance(current.this.this, exp.Var) and current.this.this.name.upper() == "SERVERNAME"
+                ):
+                    continue
+        allowed_args = ALLOWED_ARGS.get(type(node).__name__)
+        if allowed_args is None:
+            raise deny("SQL_UNSUPPORTED_CONSTRUCT", f"The read-only policy does not support the {type(node).__name__} construct.")
+        if node.comments:
+            raise deny("SQL_COMMENT_OR_HINT", "SQL comments and optimizer hints are not allowed.")
+        for key, value in node.args.items():
+            if key not in allowed_args and value is not None and value is not False and value != []:
+                raise deny("SQL_UNSUPPORTED_CLAUSE", f"The {key.rstrip('_').upper()} clause is not allowed on {type(node).__name__}.")
         if isinstance(node, exp.Identifier):
-            if not IDENTIFIER.fullmatch(node.name):
+            if not (node.quoted and re.fullmatch(CATALOG_IDENTIFIER, node.name)) and not IDENTIFIER.fullmatch(node.name):
                 raise deny()
-            if dialect == "oracle" and not node.quoted:
+            if source.dialect == "oracle" and not node.quoted:
                 node.set("this", node.name.upper())
         elif isinstance(node, exp.Column) and node.name.upper() in {"NEXTVAL", "CURRVAL"}:
             raise deny()
@@ -231,13 +287,20 @@ def validate_tables(tree: exp.Expression, source: Datasource, scopes: list[Scope
         if isinstance(node, exp.Table) and not node.db
         and node.name in scope.cte_sources and resolved is scope.cte_sources[node.name]
     }
+    allowed = set(source.allowed_objects)
+    blocked = {name.casefold() for name in source.blocked_objects}
     for table in tree.find_all(exp.Table):
         if not isinstance(table.this, exp.Identifier):
             raise deny()
-        if table.db and f"{table.db}.{table.name}" in source.allowed_objects:
+        if id(table) in cte_references:
             continue
-        if id(table) not in cte_references:
-            raise GatewayError(422, "OBJECT_NOT_ALLOWED", "Use a schema-qualified object listed in the datasource catalog.")
+        if not table.db:
+            raise GatewayError(422, "OBJECT_NOT_ALLOWED", "Use a schema-qualified name for each table or view.", diagnostic="SQL_SCHEMA_REQUIRED")
+        name = qualified_object_name(table.db, table.name)
+        if name.casefold() in blocked:
+            raise GatewayError(422, "OBJECT_NOT_ALLOWED", "This object is on the datasource's blocklist.", diagnostic="SQL_OBJECT_BLOCKED")
+        if name not in allowed:
+            raise GatewayError(422, "OBJECT_NOT_ALLOWED", "This table or view is outside the datasource's authorized catalog.")
 
 
 def validate_oracle_columns(tree: exp.Expression, source: Datasource, scopes: list[Scope]) -> None:
@@ -247,7 +310,7 @@ def validate_oracle_columns(tree: exp.Expression, source: Datasource, scopes: li
         columns = {}
         for alias, (_, resolved) in scope.selected_sources.items():
             if isinstance(resolved, exp.Table):
-                entry = source.catalog[f"{resolved.db}.{resolved.name}"]
+                entry = source.catalog[qualified_object_name(resolved.db, resolved.name)]
                 columns[alias] = {column.name for column in entry.columns}
             else:
                 columns[alias] = output_columns(resolved)

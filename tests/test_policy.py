@@ -22,7 +22,7 @@ from querygate.policy import validate_query
     ],
 )
 def test_allowed_queries(settings, datasource, sql, params, expected):
-    request = QueryRequest(datasource_id=datasource, sql=sql, params=params)
+    request = QueryRequest(datasource_id=datasource, reason="Verify the query policy", sql=sql, params=params)
     query = validate_query(request, settings.datasources[datasource])
     assert query.sql == sql.removesuffix(";")
     assert query.params == expected
@@ -59,7 +59,7 @@ def test_allowed_queries(settings, datasource, sql, params, expected):
 )
 def test_policy_denials(settings, datasource, sql):
     with pytest.raises(GatewayError) as error:
-        validate_query(QueryRequest(datasource_id=datasource, sql=sql), settings.datasources[datasource])
+        validate_query(QueryRequest(datasource_id=datasource, reason="Verify the query policy", sql=sql), settings.datasources[datasource])
     assert error.value.code in {"POLICY_DENIED", "SQL_PARSE_ERROR", "OBJECT_NOT_ALLOWED", "COLUMN_NOT_ALLOWED"}
 
 
@@ -76,4 +76,4 @@ def test_policy_denials(settings, datasource, sql):
 )
 def test_invalid_bindings(settings, datasource, sql, params):
     with pytest.raises(GatewayError, match="bind markers"):
-        validate_query(QueryRequest(datasource_id=datasource, sql=sql, params=params), settings.datasources[datasource])
+        validate_query(QueryRequest(datasource_id=datasource, reason="Verify the query policy", sql=sql, params=params), settings.datasources[datasource])

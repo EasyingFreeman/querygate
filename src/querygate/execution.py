@@ -5,6 +5,7 @@ import math
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import date, time, timedelta
 from decimal import Decimal
 from time import monotonic
@@ -87,7 +88,14 @@ def normalize_cell(value: Any, max_bytes: int) -> BindValue:
     raise GatewayError(422, "UNSUPPORTED_RESULT_TYPE", "Cast result columns to supported scalar types.")
 
 
-def encode_result(cursor: Cursor, query_id: str, deadline: Deadline, max_rows: int, max_bytes: int) -> bytes:
+@dataclass(frozen=True)
+class EncodedResult:
+    body: bytes
+    row_count: int
+    truncated: bool
+
+
+def encode_result(cursor: Cursor, query_id: str, deadline: Deadline, max_rows: int, max_bytes: int) -> EncodedResult:
     description = cursor.description
     if not description:
         raise GatewayError(422, "SQL_EXECUTION_ERROR", "The query did not return a result set.")
@@ -127,7 +135,8 @@ def encode_result(cursor: Cursor, query_id: str, deadline: Deadline, max_rows: i
 
     deadline.remaining()
     metadata.update(row_count=len(rows), truncated=truncated, execution_ms=int((monotonic() - deadline.started) * 1000))
-    return json_bytes(metadata)[:-1] + b',"rows":[' + b",".join(rows) + b"]}"
+    body = json_bytes(metadata)[:-1] + b',"rows":[' + b",".join(rows) + b"]}"
+    return EncodedResult(body=body, row_count=len(rows), truncated=truncated)
 
 
 def encode_row(row: Sequence[Any], max_bytes: int) -> bytes:

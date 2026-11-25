@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "querygate"
-version = "0.1.0"
-description = "Read-only SQL query gateway for internal AI agents"
+version = "0.2.0"
+description = "Database query and audited mutation gateway for internal AI agents"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -13,12 +13,14 @@ dependencies = [
     "oracledb>=4.0.1,<27",
     "pydantic>=2.10,<3",
     "pyodbc>=5.2,<6",
+    "python-dotenv>=1.2.4,<2",
     "PyYAML>=6,<7",
     "sqlglot==30.35.0",
     "uvicorn>=0.34,<1",
 ]
 
 [project.optional-dependencies]
+mcp = ["mcp>=2.3,<3", "httpx2>=2.16,<3"]
 test = ["httpx>=0.28,<1", "pytest>=8,<10"]
 
 [tool.setuptools.packages.find]

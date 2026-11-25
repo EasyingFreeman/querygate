@@ -1,0 +1,13 @@
+{
+  "name": "querygate-claude-distribution",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "package": "node build.mjs"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/server": "2.4.0",
+    "esbuild": "0.28.2"
+  }
+}

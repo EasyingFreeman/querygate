@@ -1,9 +1,10 @@
 class GatewayError(Exception):
-    def __init__(self, status: int, code: str, message: str):
+    def __init__(self, status: int, code: str, message: str, *, diagnostic: str | None = None):
         super().__init__(message)
         self.status = status
         self.code = code
         self.message = message
+        self.diagnostic = diagnostic
         self.query_id: str | None = None
 
 
