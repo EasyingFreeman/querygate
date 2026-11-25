@@ -1,0 +1,38 @@
+clients:
+  analyst:
+    token_env: QUERYGATE_ANALYST_TOKEN
+    datasources: [finance, erp]
+
+datasources:
+  finance:
+    engine: sqlserver
+    description: Approved finance reporting views
+    connection_string_env: QUERYGATE_FINANCE_ODBC
+    max_rows: 1000
+    timeout_seconds: 10
+    max_concurrency: 2
+    allowed_objects: [ai_public.v_transactions]
+    catalog:
+      ai_public.v_transactions:
+        description: Posted transactions in the reporting currency
+        columns:
+          - {name: transaction_id, type: bigint}
+          - {name: posted_at, type: datetime2}
+          - {name: amount, type: 'decimal(19,4)'}
+
+  erp:
+    engine: oracle
+    description: Approved ERP reporting views
+    dsn_env: QUERYGATE_ERP_DSN
+    user_env: QUERYGATE_ERP_USER
+    password_env: QUERYGATE_ERP_PASSWORD
+    max_rows: 1000
+    timeout_seconds: 10
+    max_concurrency: 2
+    allowed_objects: [AI_PUBLIC.V_ORDERS]
+    catalog:
+      AI_PUBLIC.V_ORDERS:
+        description: Order totals by order identifier
+        columns:
+          - {name: ORDER_ID, type: NUMBER}
+          - {name: TOTAL_AMOUNT, type: 'NUMBER(19,4)'}
